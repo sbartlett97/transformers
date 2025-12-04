@@ -1181,7 +1181,7 @@ class MarianModel(MarianPreTrainedModel):
     The Marian Model with a language modeling head. Can be used for summarization.
     """
 )
-class MarianMTModel(MarianPreTrainedModel, GenerationMixin):
+class ModernMarianMTModel(MarianPreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     _keys_to_ignore_on_load_missing = [
         "final_logits_bias",
