@@ -45,7 +45,7 @@ from ...utils import (
     is_torchdynamo_compiling,
     logging,
 )
-from .configuration_marian import MarianConfig
+from ..marian.configuration_marian import MarianConfig
 
 
 logger = logging.get_logger(__name__)

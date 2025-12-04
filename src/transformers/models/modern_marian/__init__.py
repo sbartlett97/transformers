@@ -18,9 +18,7 @@ from ...utils.import_utils import define_import_structure
 
 
 if TYPE_CHECKING:
-    from .configuration_modern_marian import *
     from .modeling_modern_marian import *
-    from .tokenization_modern_marian import *
 else:
     import sys
 
