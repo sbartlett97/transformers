@@ -1518,4 +1518,4 @@ class MarianForCausalLM(MarianPreTrainedModel, GenerationMixin):
         )
 
 
-__all__ = ["MarianForCausalLM", "MarianModel", "MarianMTModel", "MarianPreTrainedModel"]
+__all__ = ["MarianForCausalLM", "MarianModel", "ModernMarianMTModel", "MarianPreTrainedModel"]
