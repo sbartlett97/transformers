@@ -426,7 +426,7 @@ class MarianEncoderLayer(GradientCheckpointingLayer):
             dropout=config.attention_dropout,
             config=config,
             layer_idx=layer_idx,
-            num_key_value_heads=int(config.encoder_attention_heads / 2),
+            num_key_value_heads=int(config.encoder_attention_heads / 4),
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.dropout = config.dropout
