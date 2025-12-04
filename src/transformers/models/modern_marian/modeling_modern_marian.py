@@ -51,6 +51,54 @@ from ..marian.configuration_marian import MarianConfig
 logger = logging.get_logger(__name__)
 
 
+# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Marian
+class MarianRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        MarianRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
+class MarianSwiGLUFFN(nn.Module):
+    """SwiGLU Feed-Forward Network with pre-normalization support"""
+
+    def __init__(self, config: MarianConfig, ffn_dim: int, is_decoder: bool = False):
+        super().__init__()
+        self.embed_dim = config.d_model
+        self.ffn_dim = ffn_dim
+        self.dropout = config.dropout
+        self.activation_dropout = config.activation_dropout
+
+        # SwiGLU: gate_proj outputs 2 * ffn_dim, which is split into gate and up
+        # For SwiGLU, we typically use 2/3 * 4 * d_model, but we'll use the provided ffn_dim
+        # and project to 2 * ffn_dim to split for gate and up projections
+        self.gate_proj = nn.Linear(self.embed_dim, 2 * self.ffn_dim, bias=False)
+        self.down_proj = nn.Linear(self.ffn_dim, self.embed_dim, bias=False)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # SwiGLU: gate_proj -> split -> SiLU(gate) * up -> down_proj
+        gate_up = self.gate_proj(hidden_states)
+        gate, up = gate_up.chunk(2, dim=-1)
+        hidden_states = nn.functional.silu(gate) * up
+        hidden_states = nn.functional.dropout(hidden_states, p=self.activation_dropout, training=self.training)
+        hidden_states = self.down_proj(hidden_states)
+        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+        return hidden_states
+
+
 # Copied from transformers.models.bart.modeling_bart.shift_tokens_right
 def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int):
     """
@@ -428,13 +476,12 @@ class MarianEncoderLayer(GradientCheckpointingLayer):
             layer_idx=layer_idx,
             num_key_value_heads=int(config.encoder_attention_heads / 4),
         )
-        self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
+        # Pre-normalization: normalize before attention and FFN
+        self.self_attn_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
+        self.final_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
         self.dropout = config.dropout
-        self.activation_fn = ACT2FN[config.activation_function]
-        self.activation_dropout = config.activation_dropout
-        self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
-        self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+        # SwiGLU FFN instead of standard FFN
+        self.ffn = MarianSwiGLUFFN(config, config.encoder_ffn_dim, is_decoder=False)
 
     def forward(
         self,
@@ -451,7 +498,9 @@ class MarianEncoderLayer(GradientCheckpointingLayer):
                 Whether or not to return the attentions tensors of all attention layers. See `attentions` under
                 returned tensors for more detail.
         """
+        # Pre-norm: Self Attention
         residual = hidden_states
+        hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states, attn_weights = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -459,15 +508,12 @@ class MarianEncoderLayer(GradientCheckpointingLayer):
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
 
+        # Pre-norm: Feed Forward Network (SwiGLU)
         residual = hidden_states
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
-        hidden_states = nn.functional.dropout(hidden_states, p=self.activation_dropout, training=self.training)
-        hidden_states = self.fc2(hidden_states)
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.ffn(hidden_states)
+        hidden_states = residual + hidden_states
 
         if hidden_states.dtype == torch.float16 and (
             torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
@@ -501,10 +547,9 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
 
         )
         self.dropout = config.dropout
-        self.activation_fn = ACT2FN[config.activation_function]
-        self.activation_dropout = config.activation_dropout
 
-        self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
+        # Pre-normalization: normalize before attention and FFN
+        self.self_attn_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
         self.encoder_attn = MarianGroupedQueryAttention(
             self.embed_dim,
             config.decoder_attention_heads,
@@ -514,10 +559,10 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
             layer_idx=layer_idx,
             num_key_value_heads=int(config.decoder_attention_heads / 2),
         )
-        self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.fc1 = nn.Linear(self.embed_dim, config.decoder_ffn_dim)
-        self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.encoder_attn_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
+        # SwiGLU FFN instead of standard FFN
+        self.ffn = MarianSwiGLUFFN(config, config.decoder_ffn_dim, is_decoder=True)
+        self.final_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
 
     def forward(
         self,
@@ -547,9 +592,9 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
                 Indices depicting the position of the input sequence tokens in the sequence. It is used to update the
                 cache in the correct position and to infer the complete sequence length.
         """
+        # Pre-norm: Self Attention
         residual = hidden_states
-
-        # Self Attention
+        hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
             past_key_values=past_key_values,
@@ -559,12 +604,12 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
 
-        # Cross-Attention Block
+        # Pre-norm: Cross-Attention Block
         cross_attn_weights = None
         if encoder_hidden_states is not None:
             residual = hidden_states
+            hidden_states = self.encoder_attn_layer_norm(hidden_states)
 
             hidden_states, cross_attn_weights = self.encoder_attn(
                 hidden_states=hidden_states,
@@ -576,16 +621,12 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
             )
             hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
             hidden_states = residual + hidden_states
-            hidden_states = self.encoder_attn_layer_norm(hidden_states)
 
-        # Fully Connected
+        # Pre-norm: Feed Forward Network (SwiGLU)
         residual = hidden_states
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
-        hidden_states = nn.functional.dropout(hidden_states, p=self.activation_dropout, training=self.training)
-        hidden_states = self.fc2(hidden_states)
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.ffn(hidden_states)
+        hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
 
@@ -611,6 +652,8 @@ class MarianPreTrainedModel(PreTrainedModel):
         super()._init_weights(module)
         if isinstance(module, MarianSinusoidalPositionalEmbedding):
             init.copy_(module.weight, module.create_weight())
+        elif isinstance(module, MarianRMSNorm):
+            module.weight.data.fill_(1.0)
 
     @property
     def dummy_inputs(self):
