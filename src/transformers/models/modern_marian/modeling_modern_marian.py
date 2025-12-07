@@ -468,13 +468,12 @@ class MarianEncoderLayer(GradientCheckpointingLayer):
         super().__init__()
         self.embed_dim = config.d_model
 
-        self.self_attn = MarianGroupedQueryAttention(
+        self.self_attn = MarianAttention(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
             config=config,
-            layer_idx=layer_idx,
-            num_key_value_heads=int(config.encoder_attention_heads / 4),
+            layer_idx=layer_idx
         )
         # Pre-normalization: normalize before attention and FFN
         self.self_attn_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
@@ -543,7 +542,7 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
             is_causal=True,
             config=config,
             layer_idx=layer_idx,
-            num_key_value_heads=int(config.decoder_attention_heads / 2),
+            num_key_value_heads=int(config.decoder_attention_heads / 4),
 
         )
         self.dropout = config.dropout
