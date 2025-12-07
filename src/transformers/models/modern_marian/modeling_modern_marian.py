@@ -549,14 +549,13 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
 
         # Pre-normalization: normalize before attention and FFN
         self.self_attn_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
-        self.encoder_attn = MarianGroupedQueryAttention(
+        self.encoder_attn = MarianAttention(
             self.embed_dim,
             config.decoder_attention_heads,
             dropout=config.attention_dropout,
             is_decoder=True,
             config=config,
-            layer_idx=layer_idx,
-            num_key_value_heads=int(config.decoder_attention_heads / 2),
+            layer_idx=layer_idx
         )
         self.encoder_attn_layer_norm = MarianRMSNorm(self.embed_dim, eps=1e-6)
         # SwiGLU FFN instead of standard FFN
